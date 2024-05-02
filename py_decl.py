@@ -102,8 +102,11 @@ def uf2_to_bin(file, from_block = 0):
 def get_blocks(file, from_block = 0, count = 1):
     uf2 = uf2_to_bin(file, from_block=from_block)
     _, block_data = next(uf2)
-    for _ in range(count - 1):
-        block_data += next(uf2)[1]
+    try:
+        for _ in range(count - 1):
+            block_data += next(uf2)[1]
+    except StopIteration:
+        pass # EOF
     return block_data
 
 
