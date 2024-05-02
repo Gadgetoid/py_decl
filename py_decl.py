@@ -1,7 +1,6 @@
-import struct
 import glob
 import json
-
+import struct
 
 DEBUG = 0
 
@@ -65,8 +64,7 @@ IDS = {
     ID_PICO_BOARD: "Pico Board",
     ID_BOOT2_NAME: "Boot Stage 2 Name",
 
-    ID_MP_BUILTIN_MODULE: "Builtin Module",
-    ID_FILESYSTEM: "Filesystem"
+    ID_FILESYSTEM: "FileSystem"
 }
 
 TYPES = {
@@ -123,6 +121,10 @@ def data_id_to_str(data_id):
         return "Unknown"
 
 
+def is_valid_data_id(data_id):
+    return data_id in IDS.keys()
+
+
 def data_id_to_typename(data_id):
     return data_id_to_str(data_id).replace(" ", "")
 
@@ -149,9 +151,13 @@ def _parse_type_id_and_int(file, tag, block_data):
     data_id_maybe = parse_uint32(block_data, 0)
     data_value = parse_uint32(block_data, 1)
 
-    if DEBUG: print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
+    if DEBUG:
+        print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
 
-    return data_id_to_typename(data_id_maybe), data_value
+    if is_valid_data_id(data_id_maybe):
+        return data_id_to_typename(data_id_maybe), data_value
+    else:
+        return data_id_maybe, data_value
 
 
 def _parse_type_id_and_str(file, tag, block_data):
@@ -160,16 +166,21 @@ def _parse_type_id_and_str(file, tag, block_data):
     str_addr = parse_uint32(block_data, 1)
     data_value = lookup_string(file, str_addr)
 
-    if DEBUG: print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {data_value}")
+    if DEBUG:
+        print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {data_value}")
 
-    return data_id_to_typename(data_id_maybe), data_value
+    if is_valid_data_id(data_id_maybe):
+        return data_id_to_typename(data_id_maybe), data_value
+    else:
+        return data_id_maybe, data_value
 
 
 def _parse_block_device(file, tag, block_data):
     data_id_maybe = parse_uint32(block_data, 0)
     name_addr, start_addr, size, more_info_addr, flags = struct.unpack("<IIIIH", block_data[:18])
     name = lookup_string(file, name_addr)
-    if DEBUG: print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
+    if DEBUG:
+        print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
 
     if more_info_addr:
         pass
@@ -177,11 +188,20 @@ def _parse_block_device(file, tag, block_data):
     return data_id_to_typename(data_id_maybe), {"name": name, "address": start_addr, "size": size, "flags": flags}
 
 
+def _parse_named_group(file, tag, block_data):
+    parent_id, flags, group_tag, group_id, label_addr = struct.unpack("<IHHII", block_data[:16])
+    label = lookup_string(file, label_addr)
+
+    return "NamedGroups", {"label": label, "parent": parent_id, "flags": flags, "tag": group_tag, "id": group_id}
+
+
 entry_parsers = {
     TYPE_ID_AND_INT: _parse_type_id_and_int,
     TYPE_ID_AND_STRING: _parse_type_id_and_str,
 
     TYPE_BLOCK_DEVICE: _parse_block_device,
+
+    TYPE_NAMED_GROUP: _parse_named_group,
 }
 
 
@@ -211,14 +231,17 @@ for filename in files:
         print(f"FAIL: {filename}")
         continue
 
-    print(f"FOUND: {filename}")
+    if DEBUG:
+        print(f"FOUND: {filename}")
     entries_start, entries_end, mapping_table = struct.unpack("III", block_data[start:end])
-    if DEBUG: print(f"{addr:04x} entries: {entries_start:04x} to {entries_end:04x}, mapping: {mapping_table:04x}")
+    if DEBUG:
+        print(f"{addr:04x} entries: {entries_start:04x} to {entries_end:04x}, mapping: {mapping_table:04x}")
 
     block_entries_start = addr_to_block(entries_start)
     block_entries_end = addr_to_block(entries_end)
     blocks_needed = block_entries_end - block_entries_start + 1
-    if DEBUG: print(f"Entries cover blocks {block_entries_start} to {block_entries_end}")
+    if DEBUG:
+        print(f"Entries cover blocks {block_entries_start} to {block_entries_end}")
 
     block_data = get_blocks(file, from_block=block_entries_start, count=blocks_needed)
 
@@ -227,13 +250,18 @@ for filename in files:
     entries_end -= block_to_addr(block_entries_start)
     entries_len = (entries_end - entries_start) // 4
 
-    if DEBUG: print(f"Found {entries_len} entries from {entries_start} to {entries_end}...")
+    if DEBUG:
+        print(f"Found {entries_len} entries from {entries_start} to {entries_end}...")
 
     entries = struct.unpack("I" * entries_len, block_data[entries_start:entries_end])
 
-    if DEBUG: print(' '.join([f"{entry:04x}" for entry in entries]))
+    if DEBUG:
+        print(' '.join([f"{entry:04x}" for entry in entries]))
 
-    parsed = {}
+    parsed = {
+        "FileName": filename,
+        "FileType": "uf2"
+    }
 
     for entry in entries:
         entry_block = addr_to_block(entry)
@@ -241,7 +269,8 @@ for filename in files:
 
         block_data = get_blocks(file, from_block=entry_block, count=2)[entry_offset:] # 1k ought to be enough?
 
-        if DEBUG: print(f"Entry {entry:04x} should be in block {entry_block}, inspecting: {len(block_data)} bytes...")
+        if DEBUG:
+            print(f"Entry {entry:04x} should be in block {entry_block}, inspecting: {len(block_data)} bytes...")
 
         if (entry := parse_entry(file, block_data)) is not None:
             k, v = entry
@@ -252,5 +281,16 @@ for filename in files:
                     parsed[k] = [parsed[k], v]
             else:
                 parsed[k] = v
+
+    # Ugly hack to move data inside the respective named group...
+    if "NamedGroups" in parsed:
+        namedgroups = parsed["NamedGroups"]
+        if not isinstance(namedgroups, list):
+            namedgroups = [namedgroups]
+        for group in namedgroups:
+            if group["id"] in parsed:
+                group["data"] = parsed[group["id"]]
+                del parsed[group["id"]]
+
 
     print(json.dumps(parsed, indent=4))
