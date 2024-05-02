@@ -1,5 +1,10 @@
 import struct
 import glob
+import json
+
+
+DEBUG = 0
+
 
 UF2_MAGIC_START0 = 0x0A324655  # "UF2\n"
 UF2_MAGIC_START1 = 0x9E5D5157  # Randomly selected
@@ -61,7 +66,7 @@ IDS = {
     ID_BOOT2_NAME: "Boot Stage 2 Name",
 
     ID_MP_BUILTIN_MODULE: "Builtin Module",
-    ID_FILESYSTEM: "Filesystem?"
+    ID_FILESYSTEM: "Filesystem"
 }
 
 TYPES = {
@@ -116,7 +121,11 @@ def data_id_to_str(data_id):
         return IDS[data_id]
     except KeyError:
         return "Unknown"
-    
+
+
+def data_id_to_typename(data_id):
+    return data_id_to_str(data_id).replace(" ", "")
+
 
 def lookup_string(file, address):
     block = addr_to_block(address)
@@ -140,10 +149,9 @@ def _parse_type_id_and_int(file, tag, block_data):
     data_id_maybe = parse_uint32(block_data, 0)
     data_value = parse_uint32(block_data, 1)
 
-    if data_id_maybe == ID_BINARY_END:
-        data_value = f"0x{data_value:04x}"
+    if DEBUG: print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
 
-    print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
+    return data_id_to_typename(data_id_maybe), data_value
 
 
 def _parse_type_id_and_str(file, tag, block_data):
@@ -152,13 +160,21 @@ def _parse_type_id_and_str(file, tag, block_data):
     str_addr = parse_uint32(block_data, 1)
     data_value = lookup_string(file, str_addr)
 
-    print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {data_value}")
+    if DEBUG: print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {data_value}")
+
+    return data_id_to_typename(data_id_maybe), data_value
 
 
 def _parse_block_device(file, tag, block_data):
     data_id_maybe = parse_uint32(block_data, 0)
-    name = lookup_string(file, parse_uint32(block_data, 0))
-    print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {name}")
+    name_addr, start_addr, size, more_info_addr, flags = struct.unpack("<IIIIH", block_data[:18])
+    name = lookup_string(file, name_addr)
+    if DEBUG: print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
+
+    if more_info_addr:
+        pass
+
+    return data_id_to_typename(data_id_maybe), {"name": name, "address": start_addr, "size": size, "flags": flags}
 
 
 entry_parsers = {
@@ -174,9 +190,10 @@ def parse_entry(file, block_data, include_tags=("RP", "MP")):
 
     if tag.decode("utf-8") in include_tags:
         try:
-            entry_parsers[data_type](file, tag, block_data[4:])
+            return entry_parsers[data_type](file, tag, block_data[4:])
         except KeyError:
             print(f"No parser found for: {data_type_to_str(data_type)}")
+
 
 
 files = glob.glob("*.uf2")
@@ -196,12 +213,12 @@ for filename in files:
 
     print(f"FOUND: {filename}")
     entries_start, entries_end, mapping_table = struct.unpack("III", block_data[start:end])
-    #print(f"{addr:04x} entries: {entries_start:04x} to {entries_end:04x}, mapping: {mapping_table:04x}")
+    if DEBUG: print(f"{addr:04x} entries: {entries_start:04x} to {entries_end:04x}, mapping: {mapping_table:04x}")
 
     block_entries_start = addr_to_block(entries_start)
     block_entries_end = addr_to_block(entries_end)
     blocks_needed = block_entries_end - block_entries_start + 1
-    #print(f"Entries cover blocks {block_entries_start} to {block_entries_end}")
+    if DEBUG: print(f"Entries cover blocks {block_entries_start} to {block_entries_end}")
 
     block_data = get_blocks(file, from_block=block_entries_start, count=blocks_needed)
 
@@ -210,11 +227,13 @@ for filename in files:
     entries_end -= block_to_addr(block_entries_start)
     entries_len = (entries_end - entries_start) // 4
 
-    #print(f"Found {entries_len} entries from {entries_start} to {entries_end}...")
+    if DEBUG: print(f"Found {entries_len} entries from {entries_start} to {entries_end}...")
 
     entries = struct.unpack("I" * entries_len, block_data[entries_start:entries_end])
 
-    #print(' '.join([f"{entry:04x}" for entry in entries]))
+    if DEBUG: print(' '.join([f"{entry:04x}" for entry in entries]))
+
+    parsed = {}
 
     for entry in entries:
         entry_block = addr_to_block(entry)
@@ -222,6 +241,16 @@ for filename in files:
 
         block_data = get_blocks(file, from_block=entry_block, count=2)[entry_offset:] # 1k ought to be enough?
 
-        #print(f"Entry {entry:04x} should be in block {entry_block}, inspecting: {len(block_data)} bytes...")
+        if DEBUG: print(f"Entry {entry:04x} should be in block {entry_block}, inspecting: {len(block_data)} bytes...")
 
-        parse_entry(file, block_data)
+        if (entry := parse_entry(file, block_data)) is not None:
+            k, v = entry
+            if k in parsed:
+                if isinstance(parsed[k], list):
+                    parsed[k].append(v)
+                else:
+                    parsed[k] = [parsed[k], v]
+            else:
+                parsed[k] = v
+
+    print(json.dumps(parsed, indent=4))
