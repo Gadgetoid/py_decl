@@ -62,9 +62,7 @@ IDS = {
     ID_PROGRAM_BUILD_ATTRIBUTE: "Program Build Attribute",
     ID_SDK_VERSION: "SDK Version",
     ID_PICO_BOARD: "Pico Board",
-    ID_BOOT2_NAME: "Boot Stage 2 Name",
-
-    ID_FILESYSTEM: "FileSystem"
+    ID_BOOT2_NAME: "Boot Stage 2 Name"
 }
 
 TYPES = {
@@ -80,6 +78,8 @@ TYPES = {
     TYPE_PINS_WITH_NAMES: "Pins With Names",
     TYPE_NAMED_GROUP: "Named Group"
 }
+
+ALWAYS_A_LIST = ("NamedGroup", "BlockDevice", "ProgramFeature")
 
 
 def addr_to_block(addr):
@@ -138,18 +138,8 @@ def lookup_string(file, address):
     return data.decode("utf-8")
 
 
-def nth_word(n, count=1):
-    o = n * 4
-    return slice(o, o+4*count)
-
-
-def parse_uint32(block_data, nth):
-    return struct.unpack("<I", block_data[nth_word(nth)])[0]
-
-
 def _parse_type_id_and_int(file, tag, block_data):
-    data_id_maybe = parse_uint32(block_data, 0)
-    data_value = parse_uint32(block_data, 1)
+    data_id_maybe, data_value = struct.unpack("<II", block_data[:8])
 
     if DEBUG:
         print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
@@ -161,9 +151,7 @@ def _parse_type_id_and_int(file, tag, block_data):
 
 
 def _parse_type_id_and_str(file, tag, block_data):
-    data_id_maybe = parse_uint32(block_data, 0)
-    # This is the address of a null terminated string elsewhere...
-    str_addr = parse_uint32(block_data, 1)
+    data_id_maybe, str_addr = struct.unpack("<II", block_data[:8])
     data_value = lookup_string(file, str_addr)
 
     if DEBUG:
@@ -176,23 +164,23 @@ def _parse_type_id_and_str(file, tag, block_data):
 
 
 def _parse_block_device(file, tag, block_data):
-    data_id_maybe = parse_uint32(block_data, 0)
     name_addr, start_addr, size, more_info_addr, flags = struct.unpack("<IIIIH", block_data[:18])
     name = lookup_string(file, name_addr)
+
     if DEBUG:
-        print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
+        print(f"{tag}: Block Device: {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
 
     if more_info_addr:
         pass
 
-    return data_id_to_typename(data_id_maybe), {"name": name, "address": start_addr, "size": size, "flags": flags}
+    return "BlockDevice", {"name": name, "address": start_addr, "size": size, "flags": flags}
 
 
 def _parse_named_group(file, tag, block_data):
     parent_id, flags, group_tag, group_id, label_addr = struct.unpack("<IHHII", block_data[:16])
     label = lookup_string(file, label_addr)
 
-    return "NamedGroups", {"label": label, "parent": parent_id, "flags": flags, "tag": group_tag, "id": group_id}
+    return "NamedGroup", {"label": label, "parent": parent_id, "flags": flags, "tag": group_tag, "id": group_id}
 
 
 entry_parsers = {
@@ -206,7 +194,7 @@ entry_parsers = {
 
 
 def parse_entry(file, block_data, include_tags=("RP", "MP")):
-    data_type, tag = struct.unpack("<H2s", block_data[nth_word(0)])
+    data_type, tag = struct.unpack("<H2s", block_data[:4])
 
     if tag.decode("utf-8") in include_tags:
         try:
@@ -276,18 +264,17 @@ for filename in files:
             k, v = entry
             if k in parsed:
                 if isinstance(parsed[k], list):
-                    parsed[k].append(v)
+                    parsed[k] += [v]
                 else:
                     parsed[k] = [parsed[k], v]
             else:
-                parsed[k] = v
+                # Coerce some things into a list, even if there's one entry,
+                # so the output dict is predictable.
+                parsed[k] = [v] if k in ALWAYS_A_LIST else v
 
     # Ugly hack to move data inside the respective named group...
-    if "NamedGroups" in parsed:
-        namedgroups = parsed["NamedGroups"]
-        if not isinstance(namedgroups, list):
-            namedgroups = [namedgroups]
-        for group in namedgroups:
+    if "NamedGroup" in parsed:
+        for group in parsed["NamedGroup"]:
             if group["id"] in parsed:
                 group["data"] = parsed[group["id"]]
                 del parsed[group["id"]]
