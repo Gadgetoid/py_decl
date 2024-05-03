@@ -1,8 +1,10 @@
 import glob
+import io
 import json
 import struct
+import sys
 
-DEBUG = 0
+DEBUG = False
 
 
 UF2_MAGIC_START0 = 0x0A324655  # "UF2\n"
@@ -13,28 +15,28 @@ FS_START_ADDR    = 0x1012c000  # Pico W MicroPython LFSV2 offset
 
 FLASH_START_ADDR = 0x10000000
 
-BLOCK_SIZE = 512
-DATA_SIZE = 256
-HEADER_SIZE = 32
-FOOTER_SIZE = 4
+BLOCK_SIZE   = 512
+DATA_SIZE    = 256
+HEADER_SIZE  = 32
+FOOTER_SIZE  = 4
 PADDING_SIZE = BLOCK_SIZE - DATA_SIZE - HEADER_SIZE - FOOTER_SIZE
 DATA_PADDING = b"\x00" * PADDING_SIZE
 
 BI_MAGIC = b'\xf2\xeb\x88\x71'
 BI_END = b'\x90\xa3\x1a\xe7'
 
-TYPE_RAW_DATA = 1
-TYPE_SIZED_DATA = 2
+TYPE_RAW_DATA        = 1
+TYPE_SIZED_DATA      = 2
 TYPE_LIST_ZERO_TERMINATED = 3
-TYPE_BSON = 4
-TYPE_ID_AND_INT = 5
-TYPE_ID_AND_STRING = 6
+TYPE_BSON            = 4
+TYPE_ID_AND_INT      = 5
+TYPE_ID_AND_STRING   = 6
 
-TYPE_BLOCK_DEVICE = 7
-TYPE_PINS_WITH_FUNC = 8
-TYPE_PINS_WITH_NAME = 9
+TYPE_BLOCK_DEVICE    = 7
+TYPE_PINS_WITH_FUNC  = 8
+TYPE_PINS_WITH_NAME  = 9
 TYPE_PINS_WITH_NAMES = 9
-TYPE_NAMED_GROUP = 10
+TYPE_NAMED_GROUP     = 10
 
 ID_PROGRAM_NAME = 0x02031c86
 ID_PROGRAM_VERSION_STRING = 0x11a9bc3a
@@ -82,205 +84,198 @@ TYPES = {
 ALWAYS_A_LIST = ("NamedGroup", "BlockDevice", "ProgramFeature")
 
 
-def addr_to_block(addr):
-    return (addr - FLASH_START_ADDR) // DATA_SIZE
+class UF2Reader(io.BufferedReader):
+    def __init__(self, filepath):
+        bin = b"".join(self.uf2_to_bin(filepath))
+        io.BufferedReader.__init__(self, io.BytesIO(bin))
+
+    def uf2_to_bin(self, filepath):
+        file = open(filepath, "rb")
+        while data := file.read(BLOCK_SIZE):
+            # start0, start1, flags, addr, size, block_no, num_blocks, family_id = struct.unpack(b"<IIIIIIII", data[:HEADER_SIZE])
+            yield data[HEADER_SIZE:HEADER_SIZE + DATA_SIZE]
 
 
-def block_to_addr(block):
-    return (block * DATA_SIZE) + FLASH_START_ADDR
+class PyDecl:
+    def __init__(self, filepath):
+        self.entry_parsers = {
+            TYPE_ID_AND_INT: self._parse_type_id_and_int,
+            TYPE_ID_AND_STRING: self._parse_type_id_and_str,
 
+            TYPE_BLOCK_DEVICE: self._parse_block_device,
 
-def uf2_to_bin(file, from_block = 0):
-    file.seek(from_block * BLOCK_SIZE)
-    while data := file.read(BLOCK_SIZE):
-        start0, start1, flags, addr, size, block_no, num_blocks, family_id = struct.unpack(b"<IIIIIIII", data[:HEADER_SIZE])
-        #print(f"Block {block_no}/{num_blocks} addr {addr:08x} size {size}")
-        block_data = data[HEADER_SIZE:HEADER_SIZE + DATA_SIZE]
-        yield addr, block_data
+            TYPE_NAMED_GROUP: self._parse_named_group,
+        }
 
+        self.file = UF2Reader(filepath)
 
-def get_blocks(file, from_block = 0, count = 1):
-    uf2 = uf2_to_bin(file, from_block=from_block)
-    _, block_data = next(uf2)
-    try:
-        for _ in range(count - 1):
-            block_data += next(uf2)[1]
-    except StopIteration:
-        pass # EOF
-    return block_data
+    def parse(self):
+        self.file.seek(0)
 
+        self.read_until(BI_MAGIC)
 
-def data_type_to_str(data_type):
-    try:
-        return TYPES[data_type]
-    except KeyError:
-        return "Unknown"
+        data = self.read_until(BI_END)
 
-
-def data_id_to_str(data_id):
-    try:
-        return IDS[data_id]
-    except KeyError:
-        return "Unknown"
-
-
-def is_valid_data_id(data_id):
-    return data_id in IDS.keys()
-
-
-def data_id_to_typename(data_id):
-    return data_id_to_str(data_id).replace(" ", "")
-
-
-def lookup_string(file, address):
-    block = addr_to_block(address)
-    offset = address - block_to_addr(block)
-    data = get_blocks(file, from_block=block, count=4)[offset:]
-    end = data.index(b"\x00")
-    data = data[:end]
-    return data.decode("utf-8")
-
-
-def _parse_type_id_and_int(file, tag, block_data):
-    data_id_maybe, data_value = struct.unpack("<II", block_data[:8])
-
-    if DEBUG:
-        print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
-
-    if is_valid_data_id(data_id_maybe):
-        return data_id_to_typename(data_id_maybe), data_value
-    else:
-        return data_id_maybe, data_value
-
-
-def _parse_type_id_and_str(file, tag, block_data):
-    data_id_maybe, str_addr = struct.unpack("<II", block_data[:8])
-    data_value = lookup_string(file, str_addr)
-
-    if DEBUG:
-        print(f"{tag}: {data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({data_type_to_str(TYPE_ID_AND_STRING)}): {data_value}")
-
-    if is_valid_data_id(data_id_maybe):
-        return data_id_to_typename(data_id_maybe), data_value
-    else:
-        return data_id_maybe, data_value
-
-
-def _parse_block_device(file, tag, block_data):
-    name_addr, start_addr, size, more_info_addr, flags = struct.unpack("<IIIIH", block_data[:18])
-    name = lookup_string(file, name_addr)
-
-    if DEBUG:
-        print(f"{tag}: Block Device: {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
-
-    if more_info_addr:
-        pass
-
-    return "BlockDevice", {"name": name, "address": start_addr, "size": size, "flags": flags}
-
-
-def _parse_named_group(file, tag, block_data):
-    parent_id, flags, group_tag, group_id, label_addr = struct.unpack("<IHHII", block_data[:16])
-    label = lookup_string(file, label_addr)
-
-    return "NamedGroup", {"label": label, "parent": parent_id, "flags": flags, "tag": group_tag, "id": group_id}
-
-
-entry_parsers = {
-    TYPE_ID_AND_INT: _parse_type_id_and_int,
-    TYPE_ID_AND_STRING: _parse_type_id_and_str,
-
-    TYPE_BLOCK_DEVICE: _parse_block_device,
-
-    TYPE_NAMED_GROUP: _parse_named_group,
-}
-
-
-def parse_entry(file, block_data, include_tags=("RP", "MP")):
-    data_type, tag = struct.unpack("<H2s", block_data[:4])
-
-    if tag.decode("utf-8") in include_tags:
-        try:
-            return entry_parsers[data_type](file, tag, block_data[4:])
-        except KeyError:
-            print(f"No parser found for: {data_type_to_str(data_type)}")
-
-
-
-files = glob.glob("*.uf2")
-
-for filename in files:
-    file = open(filename, "rb")
-    uf2 = uf2_to_bin(file)
-    next(uf2) # Skip first block
-    addr, block_data = next(uf2)
-
-    try:
-        start = block_data.index(BI_MAGIC) + 4
-        end = block_data.index(BI_END)
-    except ValueError:
-        print(f"FAIL: {filename}")
-        continue
-
-    if DEBUG:
-        print(f"FOUND: {filename}")
-    entries_start, entries_end, mapping_table = struct.unpack("III", block_data[start:end])
-    if DEBUG:
-        print(f"{addr:04x} entries: {entries_start:04x} to {entries_end:04x}, mapping: {mapping_table:04x}")
-
-    block_entries_start = addr_to_block(entries_start)
-    block_entries_end = addr_to_block(entries_end)
-    blocks_needed = block_entries_end - block_entries_start + 1
-    if DEBUG:
-        print(f"Entries cover blocks {block_entries_start} to {block_entries_end}")
-
-    block_data = get_blocks(file, from_block=block_entries_start, count=blocks_needed)
-
-    # Convert our start and end positiont to block relative
-    entries_start -= block_to_addr(block_entries_start)
-    entries_end -= block_to_addr(block_entries_start)
-    entries_len = (entries_end - entries_start) // 4
-
-    if DEBUG:
-        print(f"Found {entries_len} entries from {entries_start} to {entries_end}...")
-
-    entries = struct.unpack("I" * entries_len, block_data[entries_start:entries_end])
-
-    if DEBUG:
-        print(' '.join([f"{entry:04x}" for entry in entries]))
-
-    parsed = {
-        "FileName": filename,
-        "FileType": "uf2"
-    }
-
-    for entry in entries:
-        entry_block = addr_to_block(entry)
-        entry_offset = entry - block_to_addr(entry_block)
-
-        block_data = get_blocks(file, from_block=entry_block, count=2)[entry_offset:] # 1k ought to be enough?
+        if len(data) != 12:
+            sys.stderr.write(f"ERROR: Failed to parse {filename}\n")
+            return None
 
         if DEBUG:
-            print(f"Entry {entry:04x} should be in block {entry_block}, inspecting: {len(block_data)} bytes...")
+            print(f"FOUND: {filename}")
 
-        if (entry := parse_entry(file, block_data)) is not None:
-            k, v = entry
-            if k in parsed:
-                if isinstance(parsed[k], list):
-                    parsed[k] += [v]
+        entries_start, entries_end, mapping_table = struct.unpack("III", data)
+
+        if DEBUG:
+            print(f"entries: {entries_start:04x} to {entries_end:04x}, mapping: {mapping_table:04x}")
+
+        # Convert our start and end positiont to block relative
+        entries_start = self.addr_to_bin_offset(entries_start)
+        entries_end = self.addr_to_bin_offset(entries_end)
+        entries_bytes_len = entries_end - entries_start
+        entries_len = entries_bytes_len // 4
+
+        if DEBUG:
+            print(f"Found {entries_len} entries from {entries_start} to {entries_end}, len {entries_bytes_len}...")
+
+        self.file.seek(entries_start)
+        data = self.file.read(entries_bytes_len)
+
+        if len(data) != entries_bytes_len:
+            sys.stderr.write(f"ERROR: Failed to parse {filename}\n")
+            return None
+
+        entries = struct.unpack("I" * entries_len, data)
+
+        if DEBUG:
+            print(' '.join([f"{entry:04x}" for entry in entries]))
+
+        parsed = {
+            "FileName": filename,
+            "FileType": "uf2"
+        }
+
+        for entry in entries:
+            entry_offset = self.addr_to_bin_offset(entry)
+
+            self.file.seek(entry_offset)
+
+            if DEBUG:
+                print(f"Entry {entry:04x} should be at offset {entry_offset}...")
+
+            if (entry := self.parse_entry()) is not None:
+                k, v = entry
+                if k in parsed:
+                    if isinstance(parsed[k], list):
+                        parsed[k] += [v]
+                    else:
+                        parsed[k] = [parsed[k], v]
                 else:
-                    parsed[k] = [parsed[k], v]
-            else:
-                # Coerce some things into a list, even if there's one entry,
-                # so the output dict is predictable.
-                parsed[k] = [v] if k in ALWAYS_A_LIST else v
+                    # Coerce some things into a list, even if there's one entry,
+                    # so the output dict is predictable.
+                    parsed[k] = [v] if k in ALWAYS_A_LIST else v
 
-    # Ugly hack to move data inside the respective named group...
-    if "NamedGroup" in parsed:
-        for group in parsed["NamedGroup"]:
-            if group["id"] in parsed:
-                group["data"] = parsed[group["id"]]
-                del parsed[group["id"]]
+        # Ugly hack to move data inside the respective named group...
+        if "NamedGroup" in parsed:
+            for group in parsed["NamedGroup"]:
+                if group["id"] in parsed:
+                    group["data"] = parsed[group["id"]]
+                    del parsed[group["id"]]
+
+        return parsed
+
+    def addr_to_bin_offset(self, addr):
+        return addr - FLASH_START_ADDR
+
+    def bin_offset_to_addr(self, offset):
+        return offset + FLASH_START_ADDR
+
+    def data_type_to_str(self, data_type):
+        try:
+            return TYPES[data_type]
+        except KeyError:
+            return "Unknown"
+
+    def data_id_to_str(self, data_id):
+        try:
+            return IDS[data_id]
+        except KeyError:
+            return "Unknown"
+
+    def is_valid_data_id(self, data_id):
+        return data_id in IDS.keys()
+
+    def data_id_to_typename(self, data_id):
+        return self.data_id_to_str(data_id).replace(" ", "")
+
+    def _read_until(self, delimiter=b"\x00"):
+        while (chunk := self.file.read(len(delimiter))) != delimiter:
+            yield chunk
+
+    def read_until(self, delimiter=b"\x00"):
+        return b''.join(self._read_until(delimiter))
+
+    def lookup_string(self, address):
+        offset = self.addr_to_bin_offset(address)
+        self.file.seek(offset)
+        data = self.read_until(delimiter=b"\x00")
+        return data.decode("utf-8")
+
+    def _parse_type_id_and_int(self, tag):
+        data_id_maybe, data_value = struct.unpack("<II", self.file.read(8))
+
+        if DEBUG:
+            print(f"{tag}: {self.data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({self.data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
+
+        if self.is_valid_data_id(data_id_maybe):
+            return self.data_id_to_typename(data_id_maybe), data_value
+        else:
+            return data_id_maybe, data_value
+
+    def _parse_type_id_and_str(self, tag):
+        data_id_maybe, str_addr = struct.unpack("<II", self.file.read(8))
+        data_value = self.lookup_string(str_addr)
+
+        if DEBUG:
+            print(f"{tag}: {self.data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({self.data_type_to_str(TYPE_ID_AND_STRING)}): {data_value}")
+
+        if self.is_valid_data_id(data_id_maybe):
+            return self.data_id_to_typename(data_id_maybe), data_value
+        else:
+            return data_id_maybe, data_value
+
+    def _parse_block_device(self, tag):
+        name_addr, start_addr, size, more_info_addr, flags = struct.unpack("<IIIIH", self.file.read(18))
+        name = self.lookup_string(name_addr)
+
+        if DEBUG:
+            print(f"{tag}: Block Device: {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
+
+        if more_info_addr:
+            pass
+
+        return "BlockDevice", {"name": name, "address": start_addr, "size": size, "flags": flags}
+
+    def _parse_named_group(self, tag):
+        parent_id, flags, group_tag, group_id, label_addr = struct.unpack("<IHHII", self.file.read(16))
+        label = self.lookup_string(label_addr)
+
+        return "NamedGroup", {"label": label, "parent": parent_id, "flags": flags, "tag": group_tag, "id": group_id}
+
+    def parse_entry(self, include_tags=("RP", "MP")):
+        data_type, tag = struct.unpack("<H2s", self.file.read(4))
+
+        if tag.decode("utf-8") in include_tags:
+            try:
+                return self.entry_parsers[data_type](tag)
+            except KeyError:
+                sys.stderr.write(f"ERROR: No parser found for: {self.data_type_to_str(data_type)}\n")
 
 
-    print(json.dumps(parsed, indent=4))
+if __name__ == "__main__":
+    files = glob.glob("*.uf2")
+
+    for filename in files:
+        py_decl = PyDecl(filename)
+        parsed = py_decl.parse()
+
+        print(json.dumps(parsed, indent=4))
