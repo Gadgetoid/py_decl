@@ -42,3 +42,4 @@ See: https://github.com/Gadgetoid/py_decl/issues/1
 ## Special Thanks
 
 * I would not have figured out this stuff without the README at https://github.com/rp-rs/rp-binary-info
+* Or the binary structures detailed at https://github.com/raspberrypi/pico-sdk/blob/master/src/common/pico_binary_info/include/pico/binary_info/structure.h
