@@ -1,4 +1,4 @@
-import glob
+#!/usr/bin/env python3
 import io
 import json
 import struct
@@ -84,10 +84,29 @@ TYPES = {
 ALWAYS_A_LIST = ("NamedGroup", "BlockDevice", "ProgramFeature")
 
 
-class UF2Reader(io.BufferedReader):
+class MemoryReader():
+    def __init__(self, mem, global_offset=FLASH_START_ADDR):
+        self.mem = mem
+        self.offset = 0
+        self.buf_len = 16
+        self.global_offset = global_offset
+        self.buf = bytearray(self.buf_len)
+
+    def seek(self, offset):
+        self.offset = offset
+
+    def read(self, length):
+        buf = bytearray(length) if length > self.buf_len else self.buf
+        for i in range(length):
+            buf[i] = self.mem[self.global_offset + self.offset]
+            self.offset += 1
+        return bytes(buf[:length])
+
+
+class UF2Reader(io.BytesIO):
     def __init__(self, filepath):
         bin = b"".join(self.uf2_to_bin(filepath))
-        io.BufferedReader.__init__(self, io.BytesIO(bin))
+        io.BytesIO.__init__(self, bin)
 
     def uf2_to_bin(self, filepath):
         file = open(filepath, "rb")
@@ -97,7 +116,7 @@ class UF2Reader(io.BufferedReader):
 
 
 class PyDecl:
-    def __init__(self, filepath, debug=False):
+    def __init__(self, file, debug=False):
         self.entry_parsers = {
             TYPE_ID_AND_INT: self._parse_type_id_and_int,
             TYPE_ID_AND_STRING: self._parse_type_id_and_str,
@@ -107,7 +126,7 @@ class PyDecl:
             TYPE_NAMED_GROUP: self._parse_named_group,
         }
 
-        self.file = UF2Reader(filepath)
+        self.file = file
         self.debug = debug
 
     def parse(self):
@@ -118,11 +137,7 @@ class PyDecl:
         data = self.read_until(BI_END)
 
         if len(data) != 12:
-            sys.stderr.write(f"ERROR: Failed to parse {filename}\n")
             return None
-
-        if DEBUG:
-            print(f"FOUND: {filename}")
 
         entries_start, entries_end, mapping_table = struct.unpack("III", data)
 
@@ -142,7 +157,6 @@ class PyDecl:
         data = self.file.read(entries_bytes_len)
 
         if len(data) != entries_bytes_len:
-            sys.stderr.write(f"ERROR: Failed to parse {filename}\n")
             return None
 
         entries = struct.unpack("I" * entries_len, data)
@@ -274,37 +288,44 @@ if __name__ == "__main__":
     import argparse
     import pathlib
 
-    def valid_file(file):
-        file = pathlib.Path(file)
-        if not file.exists():
-            raise argparse.ArgumentTypeError(f"{file} does not exist!")
-        return file if file.exists() else None
+    def valid_file(suffixes):
+        def _valid_file(file):
+            file = pathlib.Path(file)
+            if not file.exists():
+                raise argparse.ArgumentTypeError(f"{file} does not exist!")
+            if file.suffix.lower() not in suffixes:
+                raise argparse.ArgumentTypeError(f"{file.suffix.lower()} format not supported!")
+            return file if file.exists() else None
+        return _valid_file
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--verify", action="store_true", default=False, help="Perform basic verification.")
     parser.add_argument("--to-json", action="store_true", default=False, help="Output data as JSON.")
-    parser.add_argument("files", type=valid_file, nargs="+", help="Files to parse.")
+    parser.add_argument("files", type=valid_file(('.uf2', '.bin')), nargs="+", help="Files to parse.")
     args = parser.parse_args()
 
     validation_errors = False
 
     for filename in args.files:
-        py_decl = PyDecl(filename)
+        print(f"Processing: {filename}")
+
+        py_decl = PyDecl(UF2Reader(filename) if filename.suffix.lower() == '.uf2' else open(filename, "rb"))
         parsed = py_decl.parse()
 
-        if parsed is not None:
-            print(f"Processing: {filename}")
+        if parsed is None:
+            sys.stderr.write(f"ERROR: Failed to parse {filename}\n")
+            continue
 
-            if args.to_json:
-                print(json.dumps(parsed, indent=4))
+        if args.to_json:
+            print(json.dumps(parsed, indent=4))
 
-            if args.verify:
-                binary_end = parsed.get("BinaryEndAddress", 0)
-                block_devices = parsed.get("BlockDevice", [])
-                for block_device in block_devices:
-                    if (block_addr := block_device.get("address")) < binary_end:
-                        sys.stderr.write("CRITICAL ERROR: Block device / binary overlap!\n")
-                        sys.stderr.write(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}\n")
-                        validation_errors = True
+        if args.verify:
+            binary_end = parsed.get("BinaryEndAddress", 0)
+            block_devices = parsed.get("BlockDevice", [])
+            for block_device in block_devices:
+                if (block_addr := block_device.get("address")) < binary_end:
+                    sys.stderr.write("CRITICAL ERROR: Block device / binary overlap!\n")
+                    sys.stderr.write(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}\n")
+                    validation_errors = True
 
     sys.exit(1 if validation_errors else 0)
