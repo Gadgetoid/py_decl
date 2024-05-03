@@ -22,8 +22,8 @@ FOOTER_SIZE  = 4
 PADDING_SIZE = BLOCK_SIZE - DATA_SIZE - HEADER_SIZE - FOOTER_SIZE
 DATA_PADDING = b"\x00" * PADDING_SIZE
 
-BI_MAGIC = b'\xf2\xeb\x88\x71'
-BI_END = b'\x90\xa3\x1a\xe7'
+BI_MAGIC = b"\xf2\xeb\x88\x71"
+BI_END = b"\x90\xa3\x1a\xe7"
 
 TYPE_RAW_DATA        = 1
 TYPE_SIZED_DATA      = 2
@@ -97,7 +97,7 @@ class UF2Reader(io.BufferedReader):
 
 
 class PyDecl:
-    def __init__(self, filepath):
+    def __init__(self, filepath, debug=False):
         self.entry_parsers = {
             TYPE_ID_AND_INT: self._parse_type_id_and_int,
             TYPE_ID_AND_STRING: self._parse_type_id_and_str,
@@ -108,6 +108,7 @@ class PyDecl:
         }
 
         self.file = UF2Reader(filepath)
+        self.debug = debug
 
     def parse(self):
         self.file.seek(0)
@@ -147,12 +148,9 @@ class PyDecl:
         entries = struct.unpack("I" * entries_len, data)
 
         if DEBUG:
-            print(' '.join([f"{entry:04x}" for entry in entries]))
+            print(" ".join([f"{entry:04x}" for entry in entries]))
 
-        parsed = {
-            "FileName": filename,
-            "FileType": "uf2"
-        }
+        parsed = {}
 
         for entry in entries:
             entry_offset = self.addr_to_bin_offset(entry)
@@ -212,7 +210,7 @@ class PyDecl:
             yield chunk
 
     def read_until(self, delimiter=b"\x00"):
-        return b''.join(self._read_until(delimiter))
+        return b"".join(self._read_until(delimiter))
 
     def lookup_string(self, address):
         offset = self.addr_to_bin_offset(address)
@@ -268,14 +266,45 @@ class PyDecl:
             try:
                 return self.entry_parsers[data_type](tag)
             except KeyError:
-                sys.stderr.write(f"ERROR: No parser found for: {self.data_type_to_str(data_type)}\n")
+                if self.debug:
+                    sys.stderr.write(f"ERROR: No parser found for: {self.data_type_to_str(data_type)}\n")
 
 
 if __name__ == "__main__":
-    files = glob.glob("*.uf2")
+    import argparse
+    import pathlib
 
-    for filename in files:
+    def valid_file(file):
+        file = pathlib.Path(file)
+        if not file.exists():
+            raise argparse.ArgumentTypeError(f"{file} does not exist!")
+        return file if file.exists() else None
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--verify", action="store_true", default=False, help="Perform basic verification.")
+    parser.add_argument("--to-json", action="store_true", default=False, help="Output data as JSON.")
+    parser.add_argument("files", type=valid_file, nargs="+", help="Files to parse.")
+    args = parser.parse_args()
+
+    validation_errors = False
+
+    for filename in args.files:
         py_decl = PyDecl(filename)
         parsed = py_decl.parse()
 
-        print(json.dumps(parsed, indent=4))
+        if parsed is not None:
+            print(f"Processing: {filename}")
+
+            if args.to_json:
+                print(json.dumps(parsed, indent=4))
+
+            if args.verify:
+                binary_end = parsed.get("BinaryEndAddress", 0)
+                block_devices = parsed.get("BlockDevice", [])
+                for block_device in block_devices:
+                    if (block_addr := block_device.get("address")) < binary_end:
+                        sys.stderr.write("CRITICAL ERROR: Block device / binary overlap!\n")
+                        sys.stderr.write(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}\n")
+                        validation_errors = True
+
+    sys.exit(1 if validation_errors else 0)
