@@ -2,13 +2,42 @@
 
 A Python parser for the Raspberry Pi binary declaration metadata.
 
-## TODO
+Runs as a standalone parser tool, or as a library.
 
-* Make this actually good
-* Add support for parsing .bin files
-* Support everything that's currently missing
-* Package up into a library that parses a supplied file and returns a dict
-* Add CI and tests + test with more files!
+Runs on MicroPython for introspective debugging.
+
+## CLI Usage
+
+```
+usage: py_decl.py [-h] [--verify] [--to-json] files [files ...]
+
+positional arguments:
+  files       Files to parse.
+
+options:
+  -h, --help  show this help message and exit
+  --verify    Perform basic verification.
+  --to-json   Output data as JSON.
+```
+
+eg:
+
+```
+./py_decl --to-json <uf2_or_bin_file>
+```
+
+## Library Usage
+
+```python
+from py_decl import PyDecl, UF2Reader
+
+parser = PyDecl(UF2Reader(uf2_file_path))
+print(parser.parse())
+```
+
+## TODO / Roadmap
+
+See: https://github.com/Gadgetoid/py_decl/issues/1
 
 ## Special Thanks
 
