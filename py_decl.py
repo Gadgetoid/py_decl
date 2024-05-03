@@ -25,6 +25,18 @@ DATA_PADDING = b"\x00" * PADDING_SIZE
 BI_MAGIC = b"\xf2\xeb\x88\x71"
 BI_END = b"\x90\xa3\x1a\xe7"
 
+GPIO_FUNC_XIP  = 0
+GPIO_FUNC_SPI  = 1
+GPIO_FUNC_UART = 2
+GPIO_FUNC_I2C  = 3
+GPIO_FUNC_PWM  = 4
+GPIO_FUNC_SIO  = 5
+GPIO_FUNC_PIO0 = 6
+GPIO_FUNC_PIO1 = 7
+GPIO_FUNC_GPCK = 8
+GPIO_FUNC_USB  = 9
+GPIO_FUNC_NULL = 0xf
+
 TYPE_RAW_DATA        = 1
 TYPE_SIZED_DATA      = 2
 TYPE_LIST_ZERO_TERMINATED = 3
@@ -35,7 +47,6 @@ TYPE_ID_AND_STRING   = 6
 TYPE_BLOCK_DEVICE    = 7
 TYPE_PINS_WITH_FUNC  = 8
 TYPE_PINS_WITH_NAME  = 9
-TYPE_PINS_WITH_NAMES = 9
 TYPE_NAMED_GROUP     = 10
 
 ID_PROGRAM_NAME = 0x02031c86
@@ -77,8 +88,21 @@ TYPES = {
     TYPE_BLOCK_DEVICE: "Block Device",
     TYPE_PINS_WITH_FUNC: "Pins With Func",
     TYPE_PINS_WITH_NAME: "Pins With Name",
-    TYPE_PINS_WITH_NAMES: "Pins With Names",
     TYPE_NAMED_GROUP: "Named Group"
+}
+
+GPIO_FUNCS = {
+    GPIO_FUNC_XIP: "XIP",
+    GPIO_FUNC_SPI: "SPI",
+    GPIO_FUNC_UART: "UART",
+    GPIO_FUNC_I2C: "I2C",
+    GPIO_FUNC_PWM: "PWM",
+    GPIO_FUNC_SIO: "SIO",
+    GPIO_FUNC_PIO0: "PIO0",
+    GPIO_FUNC_PIO1: "PIO1",
+    GPIO_FUNC_GPCK: "GPCK",
+    GPIO_FUNC_USB: "USB",
+    GPIO_FUNC_NULL: "NULL"
 }
 
 ALWAYS_A_LIST = ("NamedGroup", "BlockDevice", "ProgramFeature")
@@ -124,6 +148,9 @@ class PyDecl:
             TYPE_BLOCK_DEVICE: self._parse_block_device,
 
             TYPE_NAMED_GROUP: self._parse_named_group,
+
+            TYPE_PINS_WITH_FUNC: self._parse_pins_with_func,
+            TYPE_PINS_WITH_NAME: self._parse_pins_with_name,
         }
 
         self.file = file
@@ -177,6 +204,9 @@ class PyDecl:
             if (entry := self.parse_entry()) is not None:
                 k, v = entry
                 if k in parsed:
+                    if k == "Pins":
+                        parsed[k].update(v)
+                        continue
                     if isinstance(parsed[k], list):
                         parsed[k] += [v]
                     else:
@@ -272,6 +302,36 @@ class PyDecl:
         label = self.lookup_string(label_addr)
 
         return "NamedGroup", {"label": label, "parent": parent_id, "flags": flags, "tag": group_tag, "id": group_id}
+
+    def _parse_pins_with_func(self, tag):
+        pin_encoding = struct.unpack("<I", self.file.read(4))[0]
+        encoding_type = pin_encoding & 0b111
+        func = (pin_encoding & 0b1111000) >> 3
+        func_name = GPIO_FUNCS.get(func)
+
+        pin_encoding >>= 7
+        pins = []
+
+        if encoding_type == 0b001:    # Individual pins
+            for _ in range(5):
+                pins.append(pin_encoding & 0b11111)
+                pin_encoding >>= 5
+        elif encoding_type == 0b010:  # Range of pins
+            pin_end = pin_encoding & 0b11111
+            pin_start = (pin_encoding >> 5) & 0b11111
+            pins = list(range(pin_start, pin_end + 1))
+
+        result = {}
+        for pin in pins:
+            result[pin] = {"function": func_name}
+
+        return "Pins", result
+
+    def _parse_pins_with_name(self, tag):
+        pin_mask, name_addr = struct.unpack("<II", self.file.read(8))
+        name = self.lookup_string(name_addr)
+        pin_no = bin(pin_mask)[::-1].index("1")  # YOLO
+        return "Pins", {pin_no: {"name": name}}
 
     def parse_entry(self, include_tags=("RP", "MP")):
         data_type, tag = struct.unpack("<H2s", self.file.read(4))
