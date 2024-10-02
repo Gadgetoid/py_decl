@@ -170,6 +170,7 @@ class UF2Reader(io.BytesIO):
 
             count += 1
 
+
 class PyDecl:
     def __init__(self, file, debug=False):
         self.entry_parsers = {
@@ -415,8 +416,22 @@ if __name__ == "__main__":
             block_devices = parsed.get("BlockDevice", [])
             for block_device in block_devices:
                 if (block_addr := block_device.get("address")) < binary_end:
+                    overlap = binary_end - block_addr
                     sys.stderr.write("CRITICAL ERROR: Block device / binary overlap!\n")
-                    sys.stderr.write(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}\n")
+                    sys.stderr.write(f"Overlap: {overlap:,} bytes")
+                    if overlap >= 10486:
+                        sys.stderr.write(f" ({overlap / 1024 / 1024:.2f}MB)\n")
+                    else:
+                        sys.stderr.write(f" ({overlap / 1024:.2f}Kb)\n")
+                    sys.stderr.write(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}.\n")
                     validation_errors = True
+                else:
+                    remaining = block_addr - binary_end
+                    print(f"Remaining: {remaining:,} bytes", end="")
+                    if remaining >= 10486:
+                        print(f" ({remaining / 1024 / 1024:.2f}MB)")
+                    else:
+                        print(f" ({remaining / 1024:.2f}Kb)")
+                    print(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}.")
 
     sys.exit(1 if validation_errors else 0)
