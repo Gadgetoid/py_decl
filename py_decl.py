@@ -4,8 +4,6 @@ import json
 import struct
 import sys
 
-DEBUG = False
-
 
 UF2_MAGIC_START0 = 0x0A324655  # "UF2\n"
 UF2_MAGIC_START1 = 0x9E5D5157  # Randomly selected
@@ -107,6 +105,15 @@ GPIO_FUNCS = {
     GPIO_FUNC_NULL: "NULL"
 }
 
+BINARY_INFO_BLOCK_DEV_FLAG_READ = 1 << 0      # if not readable, then it is basically hidden, but tools may choose to avoid overwriting it
+BINARY_INFO_BLOCK_DEV_FLAG_WRITE = 1 << 1     #
+BINARY_INFO_BLOCK_DEV_FLAG_REFORMAT = 1 << 2  # may be reformatted..
+
+BINARY_INFO_BLOCK_DEV_FLAG_PT_UNKNOWN = 0 << 4  # unknown free to look
+BINARY_INFO_BLOCK_DEV_FLAG_PT_MBR = 1 << 4      # expect MBR
+BINARY_INFO_BLOCK_DEV_FLAG_PT_GPT = 2 << 4      # expect GPT
+BINARY_INFO_BLOCK_DEV_FLAG_PT_NONE = 3 << 4     # no partition table
+
 ALWAYS_A_LIST = ("NamedGroup", "BlockDevice", "ProgramFeature")
 
 
@@ -191,7 +198,8 @@ class PyDecl:
     def parse(self):
         self.file.seek(0)
 
-        self.read_until(BI_MAGIC)
+        if self.read_until(BI_MAGIC) is None:
+            return None
 
         data = self.read_until(BI_END)
 
@@ -200,7 +208,7 @@ class PyDecl:
 
         entries_start, entries_end, mapping_table = struct.unpack("III", data)
 
-        if DEBUG:
+        if self.debug:
             print(f"entries: {entries_start:04x} to {entries_end:04x}, mapping: {mapping_table:04x}")
 
         # Convert our start and end positiont to block relative
@@ -209,7 +217,7 @@ class PyDecl:
         entries_bytes_len = entries_end - entries_start
         entries_len = entries_bytes_len // 4
 
-        if DEBUG:
+        if self.debug:
             print(f"Found {entries_len} entries from {entries_start} to {entries_end}, len {entries_bytes_len}...")
 
         self.file.seek(entries_start)
@@ -220,7 +228,7 @@ class PyDecl:
 
         entries = struct.unpack("I" * entries_len, data)
 
-        if DEBUG:
+        if self.debug:
             print(" ".join([f"{entry:04x}" for entry in entries]))
 
         parsed = {}
@@ -230,7 +238,7 @@ class PyDecl:
 
             self.file.seek(entry_offset)
 
-            if DEBUG:
+            if self.debug:
                 print(f"Entry {entry:04x} should be at offset {entry_offset}...")
 
             if (entry := self.parse_entry()) is not None:
@@ -283,10 +291,15 @@ class PyDecl:
 
     def _read_until(self, delimiter=b"\x00"):
         while (chunk := self.file.read(len(delimiter))) != delimiter:
+            if len(chunk) == 0:
+                raise EOFError
             yield chunk
 
     def read_until(self, delimiter=b"\x00"):
-        return b"".join(self._read_until(delimiter))
+        try:
+            return b"".join(self._read_until(delimiter))
+        except EOFError:
+            return None
 
     def lookup_string(self, address):
         offset = self.addr_to_bin_offset(address)
@@ -297,7 +310,7 @@ class PyDecl:
     def _parse_type_id_and_int(self, tag):
         data_id_maybe, data_value = struct.unpack("<II", self.file.read(8))
 
-        if DEBUG:
+        if self.debug:
             print(f"{tag}: {self.data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({self.data_type_to_str(TYPE_ID_AND_INT)}): {data_value}")
 
         if self.is_valid_data_id(data_id_maybe):
@@ -309,7 +322,7 @@ class PyDecl:
         data_id_maybe, str_addr = struct.unpack("<II", self.file.read(8))
         data_value = self.lookup_string(str_addr)
 
-        if DEBUG:
+        if self.debug:
             print(f"{tag}: {self.data_id_to_str(data_id_maybe)} ({data_id_maybe:02x}) ({self.data_type_to_str(TYPE_ID_AND_STRING)}): {data_value}")
 
         if self.is_valid_data_id(data_id_maybe):
@@ -321,7 +334,7 @@ class PyDecl:
         name_addr, start_addr, size, more_info_addr, flags = struct.unpack("<IIIIH", self.file.read(18))
         name = self.lookup_string(name_addr)
 
-        if DEBUG:
+        if self.debug:
             print(f"{tag}: Block Device: {name} 0x{start_addr:04x} {size / 1024.0:0.2f}k")
 
         if more_info_addr:
@@ -390,18 +403,44 @@ if __name__ == "__main__":
             return file if file.exists() else None
         return _valid_file
 
+    def print_size(size_bytes):
+        if size_bytes >= 10486:
+            return f"{size_bytes / 1024 / 1024:.2f}MB"
+        return f"{size_bytes / 1024:.2f}Kb"
+
+    class BlockDevice:
+        def __init__(self, name, address, size, flags):
+            self.name = name
+            self.address = address
+            self.size = size
+            self.flags = flags
+
+        def __lt__(self, other):
+            return self.address < other.address
+
+        def __repr__(self):
+            perms = []
+            if self.flags & BINARY_INFO_BLOCK_DEV_FLAG_READ:
+                perms.append("read")
+            if self.flags & BINARY_INFO_BLOCK_DEV_FLAG_WRITE:
+                perms.append("write")
+            if self.flags & BINARY_INFO_BLOCK_DEV_FLAG_REFORMAT:
+                perms.append("reformat")
+            return f"{self.name}: 0x{self.address:04x} {print_size(self.size)} ({", ".join(perms)})"
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--verify", action="store_true", default=False, help="Perform basic verification.")
     parser.add_argument("--to-json", action="store_true", default=False, help="Output data as JSON.")
+    parser.add_argument("--debug", action="store_true", default=False, help="Verbose debug output.")
     parser.add_argument("files", type=valid_file(('.uf2', '.bin')), nargs="+", help="Files to parse.")
     args = parser.parse_args()
 
     validation_errors = False
 
     for filename in args.files:
-        print(f"Processing: {filename}")
+        print(f"\nProcessing: {filename}")
 
-        py_decl = PyDecl(UF2Reader(filename) if filename.suffix.lower() == '.uf2' else open(filename, "rb"))
+        py_decl = PyDecl(UF2Reader(filename) if filename.suffix.lower() == '.uf2' else open(filename, "rb"), debug=args.debug)
         parsed = py_decl.parse()
 
         if parsed is None:
@@ -413,25 +452,28 @@ if __name__ == "__main__":
 
         if args.verify:
             binary_end = parsed.get("BinaryEndAddress", 0)
-            block_devices = parsed.get("BlockDevice", [])
+            block_devices = [BlockDevice(**args) for args in parsed.get("BlockDevice", [])]
+
+            print(f"\nFound {len(block_devices)} block device(s):")
             for block_device in block_devices:
-                if (block_addr := block_device.get("address")) < binary_end:
-                    overlap = binary_end - block_addr
-                    sys.stderr.write("CRITICAL ERROR: Block device / binary overlap!\n")
-                    sys.stderr.write(f"Overlap: {overlap:,} bytes")
-                    if overlap >= 10486:
-                        sys.stderr.write(f" ({overlap / 1024 / 1024:.2f}MB)\n")
-                    else:
-                        sys.stderr.write(f" ({overlap / 1024:.2f}Kb)\n")
-                    sys.stderr.write(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}.\n")
-                    validation_errors = True
-                else:
-                    remaining = block_addr - binary_end
-                    print(f"Remaining: {remaining:,} bytes", end="")
-                    if remaining >= 10486:
-                        print(f" ({remaining / 1024 / 1024:.2f}MB)")
-                    else:
-                        print(f" ({remaining / 1024:.2f}Kb)")
-                    print(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_addr:04x}.")
+                print(block_device)
+
+            # We only need to check the first block device for overlaps
+            # this is the one with the lowest address, min uses __lt__
+            block_device = min(block_devices)
+            print(f"\nChecking {block_device.name}:")
+
+            if block_device.address < binary_end:
+                overlap = binary_end - block_device.address
+                sys.stderr.write("CRITICAL ERROR: Block device / binary overlap!\n")
+                sys.stderr.write(f"Overlap: {overlap:,} bytes, ({print_size(overlap)})\n")
+                sys.stderr.write(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_device.address:04x}.\n")
+                validation_errors = True
+            else:
+                remaining = block_device.address - binary_end
+                print(f"Remaining: {remaining:,} bytes, ({print_size(remaining)})")
+                print(f"Binary ends at 0x{binary_end:04x}, block device starts at 0x{block_device.address:04x}.")
+
+    print("")
 
     sys.exit(1 if validation_errors else 0)
